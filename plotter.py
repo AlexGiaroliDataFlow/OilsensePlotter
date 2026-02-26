@@ -81,10 +81,19 @@ if missing_files:
 st.sidebar.markdown("---")
 st.sidebar.header("Configuration Parameters")
 
-MOVING_AVERAGE_WINDOW = st.sidebar.number_input("Moving Average Window", min_value=1, value=10)
-DERIVATIVE_PERIODS = st.sidebar.number_input("Derivative Periods", min_value=1, value=10)
+MOVING_AVERAGE_WINDOW = st.sidebar.number_input(
+    "Moving Average Window", min_value=1, value=10,
+    help="Number of consecutive samples used to compute the rolling mean. Higher values produce a smoother curve but lag more behind sudden changes. Applied to all signals (amplitude, temperature, pressure)."
+)
+DERIVATIVE_PERIODS = st.sidebar.number_input(
+    "Derivative Periods", min_value=1, value=10,
+    help="Number of samples over which the finite difference (rate of change) is calculated. A larger value makes the derivative less noisy but less responsive to fast transients."
+)
 
-TIMESTAMP_MAX = st.sidebar.text_input("Maximum timestamp to plot", value="")
+TIMESTAMP_MAX = st.sidebar.text_input(
+    "Maximum timestamp to plot", value="",
+    help="Optional cut-off time. Data after this timestamp will be ignored. Format: YYYY-MM-DD HH:MM:SS. Leave empty to show all available data."
+)
 
 MAX_TS = None
 if TIMESTAMP_MAX:
@@ -95,6 +104,17 @@ if TIMESTAMP_MAX:
         MAX_TS = pd.to_datetime(ts_str)
     except Exception as e:
         st.sidebar.warning(f"Warning: invalid TIMESTAMP_MAX format: {e}")
+
+st.sidebar.markdown("---")
+st.sidebar.header("Overlays")
+SHOW_TEMPERATURE = st.sidebar.toggle(
+    "Show Temperature", value=True,
+    help="Overlay the oil temperature (°C) on each signal chart as a red line on a secondary Y-axis. Data comes from the 'Oil Temp and Pressure.db' database."
+)
+SHOW_PRESSURE = st.sidebar.toggle(
+    "Show Pressure", value=False,
+    help="Overlay the oil pressure (bar) on each signal chart as a cyan line on a secondary Y-axis. Data comes from the 'Oil Temp and Pressure.db' database."
+)
 
 # ==============================================================
 # Data Loading Functions (cached for performance)
@@ -119,7 +139,14 @@ def load_db_temperature(db_path):
         if not os.path.exists(db_path):
             return pd.DataFrame()
         with sqlite3.connect(db_path) as conn:
-            df_temp = pd.read_sql_query("SELECT time, oil_temp FROM analog_inputs", conn)
+            # Try to load both temperature and pressure; fall back gracefully
+            try:
+                df_temp = pd.read_sql_query("SELECT time, oil_temp, oil_pressure FROM analog_inputs", conn)
+            except Exception:
+                try:
+                    df_temp = pd.read_sql_query("SELECT time, oil_temp FROM analog_inputs", conn)
+                except Exception:
+                    return pd.DataFrame()
         df_temp["Timestamp"] = pd.to_datetime(df_temp["time"])
         df_temp["Timestamp"] = df_temp["Timestamp"].dt.tz_convert('UTC').dt.tz_localize(None) + pd.Timedelta(hours=1)
         df_temp.dropna(subset=["Timestamp", "oil_temp"], inplace=True)
@@ -150,7 +177,7 @@ columns_to_plot = st.sidebar.multiselect(
     "Columns to plot",
     options=available_columns,
     default=_default_cols,
-    help="Select one or more variables to display from the CSV file."
+    help="Pick the CSV columns to display. Each selected column gets its own signal chart (moving average) and a derivative chart below it."
 )
 
 if not columns_to_plot:
@@ -178,12 +205,16 @@ for col in columns_to_plot:
     df[f"{col}_Deriv"] = df[f"{col}_Avg"].diff(periods=DERIVATIVE_PERIODS) / dt
 
 # ==============================================================
-# 2.5 Read temperature database
+# 2.5 Read temperature/pressure database and apply moving average
 # ==============================================================
 df_temp_raw = load_db_temperature(DB_FILE)
 df_temp = df_temp_raw.copy()
 if not df_temp.empty and MAX_TS is not None:
     df_temp = df_temp[df_temp["Timestamp"] <= MAX_TS].reset_index(drop=True)
+if not df_temp.empty:
+    df_temp["oil_temp_avg"] = df_temp["oil_temp"].rolling(window=MOVING_AVERAGE_WINDOW, min_periods=1).mean()
+    if "oil_pressure" in df_temp.columns:
+        df_temp["oil_pressure_avg"] = df_temp["oil_pressure"].rolling(window=MOVING_AVERAGE_WINDOW, min_periods=1).mean()
 
 # ==============================================================
 # 3. Read water percentage timestamps
@@ -348,21 +379,41 @@ else:
         fig.update_yaxes(title_text=col, row=row_ax, col=1, secondary_y=False)
         fig.update_yaxes(title_text=f"Derivative {col}", row=row_deriv, col=1, secondary_y=False)
 
-        # Oil temperature overlay on secondary y-axis
-        if not df_temp.empty:
+        # Oil temperature overlay on secondary y-axis (moving-averaged)
+        if not df_temp.empty and SHOW_TEMPERATURE:
             fig.add_trace(
                 go.Scatter(
                     x=df_temp["Timestamp"],
-                    y=df_temp["oil_temp"],
+                    y=df_temp["oil_temp_avg"],
                     mode='lines',
                     line=dict(color="red", width=1.2),
                     opacity=0.8,
-                    name="Oil Temperature (C)",
-                    legendgroup=f"group{idx}",
+                    name=f"Oil Temperature (°C) - avg {MOVING_AVERAGE_WINDOW} pts",
+                    legendgroup="overlay_temp",
+                    showlegend=(idx == 0),
                 ),
                 row=row_ax, col=1, secondary_y=True
             )
-            fig.update_yaxes(title_text="Temperature (C)", color="red", row=row_ax, col=1, secondary_y=True)
+            fig.update_yaxes(title_text="Temperature (°C)", color="red", row=row_ax, col=1, secondary_y=True)
+
+        # Oil pressure overlay on secondary y-axis (moving-averaged)
+        if not df_temp.empty and SHOW_PRESSURE and "oil_pressure_avg" in df_temp.columns:
+            df_pres = df_temp.dropna(subset=["oil_pressure_avg"])
+            if not df_pres.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_pres["Timestamp"],
+                        y=df_pres["oil_pressure_avg"],
+                        mode='lines',
+                        line=dict(color="deepskyblue", width=1.2),
+                        opacity=0.8,
+                        name=f"Oil Pressure (bar) - avg {MOVING_AVERAGE_WINDOW} pts",
+                        legendgroup="overlay_pres",
+                        showlegend=(idx == 0),
+                    ),
+                    row=row_ax, col=1, secondary_y=True
+                )
+                fig.update_yaxes(title_text="Pressure (bar)", color="deepskyblue", row=row_ax, col=1, secondary_y=True)
 
     fig.update_xaxes(
         title_text="Time",
