@@ -1,0 +1,6 @@
+# To activate the virtual environment and run the Streamlit app in a single command, you can use the following in PowerShell:
+
+.\.venv\Scripts\activate; streamlit run plotter.py
+
+# Alternatively, you can run Streamlit directly using the virtual environment's executable without explicitly activating:
+.\.venv\Scripts\python.exe -m streamlit run plotter.py
