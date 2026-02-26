@@ -27,6 +27,10 @@ if "work_dir" not in st.session_state:
 if st.sidebar.button("Browse folder..."):
     import subprocess, sys, tempfile, json
     # Run tkinter in a separate process to avoid Tcl_AsyncDelete thread crashes
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _default_dir = os.path.join(_script_dir, "test")
+    if not os.path.isdir(_default_dir):
+        _default_dir = _script_dir
     _script = (
         "import tkinter as tk\n"
         "from tkinter import filedialog\n"
@@ -34,7 +38,7 @@ if st.sidebar.button("Browse folder..."):
         "root = tk.Tk()\n"
         "root.withdraw()\n"
         "root.wm_attributes('-topmost', 1)\n"
-        "folder = filedialog.askdirectory(initialdir=r'\\\\\\\\DC01\\\\Dataflow\\\\OilSense\\\\Simulatore Camera Olio')\n"
+        f"folder = filedialog.askdirectory(initialdir=r'{_default_dir}')\n"
         "root.destroy()\n"
         "print(json.dumps(folder))\n"
     )
