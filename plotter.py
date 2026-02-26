@@ -78,6 +78,30 @@ if missing_files:
     st.info("Waiting for data... Select the correct folder to continue.")
     st.stop()
 
+# ==============================================================
+# CSV Load Function (defined early to compute timestamp default)
+# ==============================================================
+@st.cache_data
+def load_csv_measurements(filepath):
+    df = pd.read_csv(
+        filepath,
+        sep=";",
+        decimal=",",
+        encoding="utf-8",
+        skip_blank_lines=True,
+    )
+    df.columns = df.columns.str.strip()
+    time_col = df.columns[0]
+    df["Timestamp"] = pd.to_datetime(df[time_col].str.replace(r'Tempo \(UTC \+01:00 yyyy-MM-dd HH:mm:ss\)', '', regex=True), format="%Y-%m-%d %H:%M:%S", exact=False)
+    return df, time_col
+
+# Peek at the CSV to get the max timestamp (cached, costs nothing on re-runs)
+_df_peek, _ = load_csv_measurements(CSV_FILE)
+_ts_max_default = (
+    _df_peek["Timestamp"].dropna().max().strftime("%Y-%m-%d %H:%M:%S")
+    if not _df_peek.empty else ""
+)
+
 st.sidebar.markdown("---")
 st.sidebar.header("Configuration Parameters")
 
@@ -91,8 +115,8 @@ DERIVATIVE_PERIODS = st.sidebar.number_input(
 )
 
 TIMESTAMP_MAX = st.sidebar.text_input(
-    "Maximum timestamp to plot", value="",
-    help="Optional cut-off time. Data after this timestamp will be ignored. Format: YYYY-MM-DD HH:MM:SS. Leave empty to show all available data."
+    "Maximum timestamp to plot", value=_ts_max_default,
+    help="Optional cut-off time. Data after this timestamp will be ignored. Format: YYYY-MM-DD HH:MM:SS. Defaults to the last available sample in the dataset."
 )
 
 MAX_TS = None
@@ -119,20 +143,6 @@ SHOW_PRESSURE = st.sidebar.toggle(
 # ==============================================================
 # Data Loading Functions (cached for performance)
 # ==============================================================
-@st.cache_data
-def load_csv_measurements(filepath):
-    df = pd.read_csv(
-        filepath,
-        sep=";",
-        decimal=",",
-        encoding="utf-8",
-        skip_blank_lines=True,
-    )
-    df.columns = df.columns.str.strip()
-    time_col = df.columns[0]
-    df["Timestamp"] = pd.to_datetime(df[time_col].str.replace(r'Tempo \(UTC \+01:00 yyyy-MM-dd HH:mm:ss\)', '', regex=True), format="%Y-%m-%d %H:%M:%S", exact=False)
-    return df, time_col
-
 @st.cache_data
 def load_db_temperature(db_path):
     try:
