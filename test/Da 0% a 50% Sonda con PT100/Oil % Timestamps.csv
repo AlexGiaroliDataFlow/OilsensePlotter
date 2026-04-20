@@ -1,0 +1,15 @@
+% Acqua in Olio,Orario (HH:mm:ss),Azione,Scarico Miscela (L),Carico Acqua (L),Carico Olio (L),Vol. Totale (L)
+"0,00%",11:58:22,Stato Iniziale,,,,5
+"10,00%",12:02:00,Sostituzione,"0,5","0,5",,5
+"19,00%",12:06:15,Sostituzione,"0,5","0,5",,5
+"27,10%",12:10:30,Sostituzione,"0,5","0,5",,5
+"34,40%",12:26:00,Sostituzione,"0,5","0,5",,5
+41%,12:32:20,Sostituzione,"0,5","0,5",,5
+47%,12:39:40,Sostituzione,"0,5","0,5",,5
+,11:58:00,Motore acceso,,,,
+,12:13:40,Motore spento,,,,
+,12:23:20,Motore acceso,,,,
+,12:48:40,Motore spento,,,,
+,12:55:20,Motore acceso,,,,
+,12:56:00,Motore spento,,,,
+,12:52:10,intervento faggiolati,,,,
