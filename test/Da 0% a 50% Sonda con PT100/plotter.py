@@ -22,15 +22,13 @@ st.title("OilSense Data Plotter")
 st.sidebar.header("Working Folder")
 
 if "work_dir" not in st.session_state:
-    st.session_state.work_dir = ""
+    st.session_state.work_dir = os.path.dirname(os.path.abspath(__file__))
 
 if st.sidebar.button("Browse folder..."):
     import subprocess, sys, tempfile, json
     # Run tkinter in a separate process to avoid Tcl_AsyncDelete thread crashes
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _default_dir = os.path.join(_script_dir, "test")
-    if not os.path.isdir(_default_dir):
-        _default_dir = _script_dir
+    _default_dir = _script_dir
     _script = (
         "import tkinter as tk\n"
         "from tkinter import filedialog\n"
@@ -62,7 +60,7 @@ if not WORK_DIR:
 
 CSV_FILE = os.path.join(WORK_DIR, "Oil Measurements.csv")
 TIMESTAMPS_FILE = os.path.join(WORK_DIR, "Oil % Timestamps.csv")
-DB_FILE = os.path.join(WORK_DIR, "Oil Temp and Pressure.db")
+DB_FILE = os.path.join(WORK_DIR, "Oil Temp and Resistance.db")
 
 missing_files = []
 if not os.path.exists(CSV_FILE):
@@ -70,7 +68,7 @@ if not os.path.exists(CSV_FILE):
 if not os.path.exists(TIMESTAMPS_FILE):
     missing_files.append("- **Oil % Timestamps.csv**: CSV with logs of actions and water percentage changes (e.g. engine on, engine off, % water in oil and their timestamps).")
 if not os.path.exists(DB_FILE):
-    missing_files.append("- **Oil Temp and Pressure.db**: SQLite database recording oil temperature over time.")
+    missing_files.append("- **Oil Temp and Resistance.db**: SQLite database recording oil temperature and resistance over time.")
 
 if missing_files:
     st.sidebar.error("Warning: incorrect folder, some files are missing.")
@@ -113,6 +111,10 @@ DERIVATIVE_PERIODS = st.sidebar.number_input(
     "Derivative Periods", min_value=1, value=10,
     help="Number of samples over which the finite difference (rate of change) is calculated. A larger value makes the derivative less noisy but less responsive to fast transients."
 )
+SHOW_DERIVATIVE = st.sidebar.toggle(
+    "Show Derivative Plots", value=False,
+    help="Show a separate subplot below each signal chart for its derivative."
+)
 
 TIMESTAMP_MAX = st.sidebar.text_input(
     "Maximum timestamp to plot", value=_ts_max_default,
@@ -130,14 +132,14 @@ if TIMESTAMP_MAX:
         st.sidebar.warning(f"Warning: invalid TIMESTAMP_MAX format: {e}")
 
 st.sidebar.markdown("---")
-st.sidebar.header("Overlays")
+st.sidebar.header("Extra Sensors")
 SHOW_TEMPERATURE = st.sidebar.toggle(
     "Show Temperature", value=True,
-    help="Overlay the oil temperature (°C) on each signal chart as a red line on a secondary Y-axis. Data comes from the 'Oil Temp and Pressure.db' database."
+    help="Overlay the oil temperature (°C) on each signal chart as a red line on a secondary Y-axis. Data comes from the 'Oil Temp and Resistance.db' database (flowsense.temp_pt100_1)."
 )
-SHOW_PRESSURE = st.sidebar.toggle(
-    "Show Pressure", value=False,
-    help="Overlay the oil pressure (bar) on each signal chart as a cyan line on a secondary Y-axis. Data comes from the 'Oil Temp and Pressure.db' database."
+SHOW_RESISTANCE = st.sidebar.toggle(
+    "Show Resistance", value=False,
+    help="Overlay the oil resistance (Ω) on each signal chart as a cyan line on a secondary Y-axis. Data comes from the 'Oil Temp and Resistance.db' database (flowsense.oil_resistance)."
 )
 
 # ==============================================================
@@ -149,16 +151,16 @@ def load_db_temperature(db_path):
         if not os.path.exists(db_path):
             return pd.DataFrame()
         with sqlite3.connect(db_path) as conn:
-            # Try to load both temperature and pressure; fall back gracefully
+            # Load temperature (temp_pt100_1) and oil_resistance from flowsense table
             try:
-                df_temp = pd.read_sql_query("SELECT time, oil_temp, oil_pressure FROM analog_inputs", conn)
+                df_temp = pd.read_sql_query("SELECT time, temp_pt100_1 AS oil_temp, oil_resistance FROM flowsense", conn)
             except Exception:
                 try:
-                    df_temp = pd.read_sql_query("SELECT time, oil_temp FROM analog_inputs", conn)
+                    df_temp = pd.read_sql_query("SELECT time, temp_pt100_1 AS oil_temp FROM flowsense", conn)
                 except Exception:
                     return pd.DataFrame()
         df_temp["Timestamp"] = pd.to_datetime(df_temp["time"])
-        df_temp["Timestamp"] = df_temp["Timestamp"].dt.tz_convert('UTC').dt.tz_localize(None) + pd.Timedelta(hours=1)
+        df_temp["Timestamp"] = df_temp["Timestamp"].dt.tz_convert('UTC').dt.tz_localize(None) + pd.Timedelta(hours=2)
         df_temp.dropna(subset=["Timestamp", "oil_temp"], inplace=True)
         df_temp.sort_values("Timestamp", inplace=True)
         return df_temp
@@ -223,8 +225,8 @@ if not df_temp.empty and MAX_TS is not None:
     df_temp = df_temp[df_temp["Timestamp"] <= MAX_TS].reset_index(drop=True)
 if not df_temp.empty:
     df_temp["oil_temp_avg"] = df_temp["oil_temp"].rolling(window=MOVING_AVERAGE_WINDOW, min_periods=1).mean()
-    if "oil_pressure" in df_temp.columns:
-        df_temp["oil_pressure_avg"] = df_temp["oil_pressure"].rolling(window=MOVING_AVERAGE_WINDOW, min_periods=1).mean()
+    if "oil_resistance" in df_temp.columns:
+        df_temp["oil_resistance_avg"] = df_temp["oil_resistance"].rolling(window=MOVING_AVERAGE_WINDOW, min_periods=1).mean()
 
 # ==============================================================
 # 3. Read water percentage timestamps
@@ -274,21 +276,31 @@ if not timestamps_df.empty:
 if df.empty:
     st.warning("No data to display for this time range.")
 else:
+    num_rows_per_col = 2 if SHOW_DERIVATIVE else 1
+    total_rows = len(columns_to_plot) * num_rows_per_col
+
     fig = make_subplots(
-        rows=len(columns_to_plot) * 2,
+        rows=total_rows,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
-        specs=[[{"secondary_y": True}]] * (len(columns_to_plot) * 2)
+        specs=[[{"secondary_y": True}]] * total_rows
     )
 
     colors_vlines = []
     if timestamps_pct:
-        colors_vlines = plotly.colors.sample_colorscale('viridis_r', [min(v / 50.0, 1.0) for (_, v, _) in timestamps_pct])
+        # Filter out entries with NaN percentage values to avoid plotly color conversion errors
+        timestamps_pct = [(ts, v, lbl) for ts, v, lbl in timestamps_pct if not (isinstance(v, float) and np.isnan(v))]
+        if timestamps_pct:
+            colors_vlines = plotly.colors.sample_colorscale('Bluered', [min(v / 50.0, 1.0) for (_, v, _) in timestamps_pct])
 
     for idx, col in enumerate(columns_to_plot):
-        row_ax = idx * 2 + 1
-        row_deriv = idx * 2 + 2
+        if SHOW_DERIVATIVE:
+            row_ax = idx * 2 + 1
+            row_deriv = idx * 2 + 2
+        else:
+            row_ax = idx + 1
+            row_deriv = None
 
         # Main signal trace (moving average)
         fig.add_trace(
@@ -304,17 +316,18 @@ else:
         )
 
         # Derivative trace
-        fig.add_trace(
-            go.Scatter(
-                x=df["Timestamp"],
-                y=df[f"{col}_Deriv"],
-                mode='lines',
-                line=dict(color="darkgoldenrod", width=1.5),
-                name=f"Derivative {col}",
-                legendgroup=f"group{idx}_deriv",
-            ),
-            row=row_deriv, col=1, secondary_y=False
-        )
+        if SHOW_DERIVATIVE:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["Timestamp"],
+                    y=df[f"{col}_Deriv"],
+                    mode='lines',
+                    line=dict(color="darkorange", width=1.5),
+                    name=f"Derivative {col}",
+                    legendgroup=f"group{idx}_deriv",
+                ),
+                row=row_deriv, col=1, secondary_y=False
+            )
 
         # Engine on/off colored background regions
         engine_events = sorted(
@@ -340,8 +353,8 @@ else:
 
                 for r in [row_ax]:
                     fig.add_vrect(
-                        x0=(pd.Timestamp(start_time).value / 1e6) - 3600000,
-                        x1=(pd.Timestamp(end_time).value / 1e6) - 3600000,
+                        x0=start_time,
+                        x1=end_time,
                         fillcolor=fill_color,
                         opacity=0.3,
                         layer="below",
@@ -353,15 +366,24 @@ else:
         for i, (ts, val, label_str) in enumerate(timestamps_pct):
             for r in [row_ax]:
                 fig.add_vline(
-                    x=(pd.Timestamp(ts).value / 1e6) - 3600000,
+                    x=ts,
                     line_color=colors_vlines[i],
                     
                     line_width=1.2,
                     line_dash="dash",
                     opacity=0.85,
-                    annotation_text=f" {label_str}",
-                    annotation_position="bottom right",
-                    annotation=dict(textangle=-90, font=dict(color=colors_vlines[i], size=10)),
+                    row=r, col=1
+                )
+                fig.add_annotation(
+                    x=ts,
+                    y=0.02,
+                    yref="y domain",
+                    text=f" {label_str}",
+                    showarrow=False,
+                    xanchor="left",
+                    yanchor="bottom",
+                    textangle=-90,
+                    font=dict(color=colors_vlines[i], size=10),
                     row=r, col=1
                 )
 
@@ -375,19 +397,29 @@ else:
 
             for r in [row_ax]:
                 fig.add_vline(
-                    x=(pd.Timestamp(ts).value / 1e6) - 3600000,
+                    x=ts,
                     line_color="black",
                     line_width=1.5,
                     line_dash="dot",
                     opacity=0.85,
-                    annotation_text=f" {action_display}",
-                    annotation_position="top right",
-                    annotation=dict(textangle=-90, font=dict(color="black", size=10)),
+                    row=r, col=1
+                )
+                fig.add_annotation(
+                    x=ts,
+                    y=0.98,
+                    yref="y domain",
+                    text=f" {action_display}",
+                    showarrow=False,
+                    xanchor="left",
+                    yanchor="top",
+                    textangle=-90,
+                    font=dict(color="black", size=10),
                     row=r, col=1
                 )
 
         fig.update_yaxes(title_text=col, row=row_ax, col=1, secondary_y=False)
-        fig.update_yaxes(title_text=f"Derivative {col}", row=row_deriv, col=1, secondary_y=False)
+        if SHOW_DERIVATIVE:
+            fig.update_yaxes(title_text=f"Derivative {col}", row=row_deriv, col=1, secondary_y=False)
 
         # Oil temperature overlay on secondary y-axis (moving-averaged)
         if not df_temp.empty and SHOW_TEMPERATURE:
@@ -406,37 +438,37 @@ else:
             )
             fig.update_yaxes(title_text="Temperature (°C)", color="red", row=row_ax, col=1, secondary_y=True)
 
-        # Oil pressure overlay on secondary y-axis (moving-averaged)
-        if not df_temp.empty and SHOW_PRESSURE and "oil_pressure_avg" in df_temp.columns:
-            df_pres = df_temp.dropna(subset=["oil_pressure_avg"])
-            if not df_pres.empty:
+        # Oil resistance overlay on secondary y-axis (moving-averaged)
+        if not df_temp.empty and SHOW_RESISTANCE and "oil_resistance_avg" in df_temp.columns:
+            df_res = df_temp.dropna(subset=["oil_resistance_avg"])
+            if not df_res.empty:
                 fig.add_trace(
                     go.Scatter(
-                        x=df_pres["Timestamp"],
-                        y=df_pres["oil_pressure_avg"],
+                        x=df_res["Timestamp"],
+                        y=df_res["oil_resistance_avg"],
                         mode='lines',
                         line=dict(color="deepskyblue", width=1.2),
                         opacity=0.8,
-                        name=f"Oil Pressure (bar) - avg {MOVING_AVERAGE_WINDOW} pts",
-                        legendgroup="overlay_pres",
+                        name=f"Oil Resistance (Ω) - avg {MOVING_AVERAGE_WINDOW} pts",
+                        legendgroup="overlay_res",
                         showlegend=(idx == 0),
                     ),
                     row=row_ax, col=1, secondary_y=True
                 )
-                fig.update_yaxes(title_text="Pressure (bar)", color="deepskyblue", row=row_ax, col=1, secondary_y=True)
+                fig.update_yaxes(title_text="Resistance (Ω)", color="deepskyblue", row=row_ax, col=1, secondary_y=True)
 
     fig.update_xaxes(
         title_text="Time",
         tickformat="%H:%M:%S",
         tickangle=60,
-        row=len(columns_to_plot) * 2, col=1
+        row=total_rows, col=1
     )
 
     if MAX_TS is not None:
         fig.update_xaxes(range=[df["Timestamp"].min(), MAX_TS])
 
     fig.update_layout(
-        height=1200,
+        height=max(600, total_rows * 300),
         title_text=f"Values averaged over {MOVING_AVERAGE_WINDOW} points vs Time",
         title_font=dict(size=16),
         hovermode="x unified",
