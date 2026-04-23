@@ -1,15 +1,118 @@
-# Per avviare correttamente il plotter segui questi passaggi:
-# 1. Spostati sulla rispettiva cartella del test/plotter.
-# 2. Attiva il virtual environment.
-# 3. Lancia il plotter da lì.
+# OilSense Plotter - guida rapida
 
-# Esempio se il venv si trova due cartelle più in alto:
-# cd "test\Da 0% a 50% Sonda con PT100"
-# ..\..\.venv\Scripts\activate
-# streamlit run plotter.py 
+## Come si avvia in locale
 
-# To activate the virtual environment and run the Streamlit app in a single command from the specific folder, you can use the following in PowerShell:
-..\..\.venv\Scripts\activate; streamlit run plotter.py
+Il file principale da usare e' `streamlit_app.py`, nella cartella principale del progetto.
+Non serve entrare nella cartella specifica del test.
 
-# Alternatively, you can run Streamlit directly using the virtual environment's executable without explicitly activating:
-..\..\.venv\Scripts\python.exe -m streamlit run plotter.py
+Da PowerShell, dalla root del progetto:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run streamlit_app.py
+```
+
+In alternativa puoi attivare prima il virtual environment:
+
+```powershell
+.\.venv\Scripts\activate
+streamlit run streamlit_app.py
+```
+
+## Cosa fa `streamlit_app.py`
+
+`streamlit_app.py` e' un entrypoint per Streamlit Community Cloud.
+Serve a dire a Streamlit quale plotter deve avviare.
+
+Dentro al file c'e' un percorso come questo:
+
+```python
+APP_PATH = (
+    Path(__file__).parent
+    / "test"
+    / "Da 0% a 50% Sonda con PT100 e Pressostato"
+    / "plotter.py"
+)
+```
+
+Questo significa:
+
+- `Path(__file__).parent` = cartella principale del repository.
+- `"test"` = cartella che contiene i vari test.
+- `"Da 0% a 50% Sonda con PT100 e Pressostato"` = cartella del test da aprire.
+- `"plotter.py"` = app Streamlit effettiva da eseguire.
+
+Il vantaggio e' che Streamlit Cloud deve conoscere solo `streamlit_app.py`, anche se i plotter veri stanno dentro sottocartelle diverse.
+
+## Come cambiare test in futuro
+
+Se aggiungi un nuovo test dentro `test/`, ad esempio:
+
+```text
+test\Nuovo Test Sensore\plotter.py
+```
+
+devi modificare solo il percorso in `streamlit_app.py`:
+
+```python
+APP_PATH = (
+    Path(__file__).parent
+    / "test"
+    / "Nuovo Test Sensore"
+    / "plotter.py"
+)
+```
+
+Poi salva il file e pubblica la modifica su GitHub:
+
+```powershell
+git add streamlit_app.py
+git commit -m "Aggiorna test Streamlit"
+git push origin master
+```
+
+Streamlit Community Cloud usera' automaticamente la nuova versione pubblicata su GitHub.
+
+## Come fare deploy su Streamlit Community Cloud
+
+Nel deploy usa questi valori:
+
+```text
+Repository: AlexGiaroliDataFlow/OilsensePlotter
+Branch: master
+Main file path: streamlit_app.py
+```
+
+Non usare come main file path un `plotter.py` dentro una sottocartella, a meno che tu non voglia deployare direttamente quel singolo file.
+La configurazione consigliata e' sempre `streamlit_app.py`, perche' rende il progetto piu' facile da cambiare.
+
+## Quando aggiungi nuovi file o nuovi test
+
+Dopo aver aggiunto o modificato file:
+
+```powershell
+git status
+git add .
+git commit -m "Aggiungi nuovo test"
+git push origin master
+```
+
+Controlla che dentro la cartella del test ci siano i file richiesti dal relativo `plotter.py`, ad esempio:
+
+```text
+Oil Measurements.csv
+Oil % Timestamps.csv
+Oil Temp and Resistance.db
+```
+
+oppure:
+
+```text
+Oil Temp and Pressure.db
+```
+
+dipende da quale `plotter.py` stai usando.
+
+## Nota importante
+
+La cartella `.venv/` non va caricata su GitHub.
+Streamlit Cloud installa le dipendenze partendo da `requirements.txt`.
