@@ -1,0 +1,2 @@
+scheda flowsense v2 H20 non isolata
+cavi separati da 1,5mmq connessi al sensore con saldatura a stagno da 3.3m

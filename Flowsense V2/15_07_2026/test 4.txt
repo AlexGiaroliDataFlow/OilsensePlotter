@@ -1,0 +1,4 @@
+scheda flowsense numero 3 v2 H20 isolata
+cavo 4x1mmq connessi al sensore con morsetti testa testa schermati da 2.3m
+firmware 5.2.5 aggiornato con letture ogni 2s
+percentuali di acqua minori, motore sempre acceso
