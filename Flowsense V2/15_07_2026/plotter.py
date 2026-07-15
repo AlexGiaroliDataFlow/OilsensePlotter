@@ -5,6 +5,7 @@ Campione non omogeneo: tracce a gradino (hold del valore precedente fino al pros
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -26,29 +27,34 @@ COLUMN_LABELS = {
     "olio_capacita_nf": "Capacità olio (nF)",
 }
 
+COLUMN_RENAME = {
+    "oil_resistance_kohm": "olio_resistenza_kohm",
+    "oil_capacitance_nf": "olio_capacita_nf",
+    "temperature_c": "pt100_1_c",
+}
+
 TARGET_ACTIONS = ("motore spento", "motore acceso", "stato iniziale", "sostituzione")
 
 
-def discover_data_files(base_dir: Path) -> dict[str, Path]:
-    temp_files = sorted(base_dir.glob("oilsense_temperatura_*.csv"))
-    oil_files = sorted(base_dir.glob("oilsense_olio_*.csv"))
-    event_files = sorted(base_dir.glob("Timestamp % Acqua in Olio*.csv"))
+def discover_tests(base_dir: Path) -> list[int]:
+    tests: set[int] = set()
+    for path in base_dir.iterdir():
+        m = re.match(r"(?i)test\s*(\d+)\s+dati\.csv$", path.name)
+        if m:
+            tests.add(int(m.group(1)))
+    return sorted(tests, reverse=True)
 
-    missing = []
-    if not temp_files:
-        missing.append("oilsense_temperatura_*.csv")
-    if not oil_files:
-        missing.append("oilsense_olio_*.csv")
-    if not event_files:
-        missing.append("Timestamp % Acqua in Olio*.csv")
 
-    if missing:
-        return {"missing": missing}
+def test_paths(base_dir: Path, test_num: int) -> dict[str, Path | None]:
+    description = base_dir / f"test {test_num} descrizione.txt"
+    if not description.exists():
+        alt = base_dir / f"test {test_num}.txt"
+        description = alt if alt.exists() else None
 
     return {
-        "temperatura": temp_files[-1],
-        "olio": oil_files[-1],
-        "eventi": event_files[-1],
+        "dati": base_dir / f"Test {test_num} dati.csv",
+        "eventi": base_dir / f"Test {test_num} orari e percentuali.csv",
+        "descrizione": description,
     }
 
 
@@ -64,45 +70,23 @@ def parse_pct(raw) -> float:
     return val
 
 
-def file_mtime(path: Path) -> float:
-    return path.stat().st_mtime
+@st.cache_data
+def load_description(filepath: str) -> str:
+    path = Path(filepath)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
 
 
 @st.cache_data
-def load_measurements(
-    temp_filepath: str,
-    oil_filepath: str,
-    _temp_mtime: float,
-    _oil_mtime: float,
-) -> pd.DataFrame:
-    temp = pd.read_csv(temp_filepath, encoding="utf-8")
-    oil = pd.read_csv(oil_filepath, encoding="utf-8")
-    temp.columns = temp.columns.str.strip()
-    oil.columns = oil.columns.str.strip()
-
-    temp["Timestamp"] = pd.to_datetime(temp["timestamp"], errors="coerce")
-    oil["Timestamp"] = pd.to_datetime(oil["timestamp"], errors="coerce")
-
-    temp = temp.rename(columns={"temperature_c": "pt100_1_c"})[["Timestamp", "pt100_1_c"]]
-    oil = oil.rename(
-        columns={
-            "oil_resistance_kohm": "olio_resistenza_kohm",
-            "oil_capacitance_nf": "olio_capacita_nf",
-        }
-    )[["Timestamp", "olio_resistenza_kohm", "olio_capacita_nf"]]
-
-    temp = temp.sort_values("Timestamp").drop_duplicates(subset=["Timestamp"], keep="last")
-    oil = oil.sort_values("Timestamp").drop_duplicates(subset=["Timestamp"], keep="last")
-
-    all_ts = pd.DataFrame(
-        {"Timestamp": pd.concat([temp["Timestamp"], oil["Timestamp"]]).drop_duplicates().sort_values().values}
-    )
-    df = all_ts.merge(temp, on="Timestamp", how="left")
-    df = df.merge(oil, on="Timestamp", how="left")
-    value_cols = [c for c in df.columns if c != "Timestamp"]
+def load_measurements(filepath: str) -> pd.DataFrame:
+    df = pd.read_csv(filepath, encoding="utf-8")
+    df.columns = df.columns.str.strip()
+    df = df.rename(columns=COLUMN_RENAME)
+    df["Timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    value_cols = [c for c in df.columns if c not in ("timestamp", "Timestamp")]
     for col in value_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-
     df.dropna(subset=["Timestamp"], inplace=True)
     df.sort_values("Timestamp", inplace=True)
     df.reset_index(drop=True, inplace=True)
@@ -112,7 +96,7 @@ def load_measurements(
 
 
 @st.cache_data
-def load_events(filepath: str, ref_date_str: str, _mtime: float) -> pd.DataFrame:
+def load_events(filepath: str, ref_date_str: str) -> pd.DataFrame:
     path = Path(filepath)
     if not path.exists():
         return pd.DataFrame()
@@ -254,50 +238,129 @@ def add_chart_overlays(fig, row_ax, df, timestamps_pct, timestamps_actions, colo
         )
 
 
-paths = discover_data_files(WORK_DIR)
-if "missing" in paths:
-    st.error(f"File mancanti in {WORK_DIR.name}: {', '.join(paths['missing'])}")
+def build_figure(
+    df: pd.DataFrame,
+    columns_to_plot: list[str],
+    timestamps_pct,
+    timestamps_actions,
+    moving_average_window: int,
+    show_derivative: bool,
+    max_ts: pd.Timestamp | None,
+    title: str,
+):
+    num_rows_per_col = 2 if show_derivative else 1
+    total_rows = len(columns_to_plot) * num_rows_per_col
+
+    fig = make_subplots(
+        rows=total_rows,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+    )
+
+    colors_vlines = []
+    if timestamps_pct:
+        colors_vlines = plotly.colors.sample_colorscale(
+            "Bluered",
+            [min(v / 50.0, 1.0) for (_, v, _) in timestamps_pct],
+        )
+
+    for idx, col in enumerate(columns_to_plot):
+        row_ax = idx * 2 + 1 if show_derivative else idx + 1
+        row_deriv = idx * 2 + 2 if show_derivative else None
+        label = COLUMN_LABELS.get(col, col)
+
+        fig.add_trace(
+            go.Scatter(
+                x=df["Timestamp"],
+                y=df[f"{col}_Avg"],
+                mode="lines",
+                line=dict(color="#1f77b4", width=1.5, shape="hv"),
+                name=f"{label} — media {moving_average_window} pt",
+                legendgroup=f"group{idx}",
+            ),
+            row=row_ax,
+            col=1,
+        )
+
+        if show_derivative and row_deriv is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["Timestamp"],
+                    y=df[f"{col}_Deriv"],
+                    mode="lines",
+                    line=dict(color="darkorange", width=1.5, shape="hv"),
+                    name=f"Derivata {label}",
+                    legendgroup=f"group{idx}_deriv",
+                ),
+                row=row_deriv,
+                col=1,
+            )
+            fig.update_yaxes(title_text=f"Derivata {label}", row=row_deriv, col=1)
+
+        add_chart_overlays(fig, row_ax, df, timestamps_pct, timestamps_actions, colors_vlines, max_ts)
+        fig.update_yaxes(title_text=label, row=row_ax, col=1)
+
+    fig.update_xaxes(
+        title_text="Tempo",
+        tickformat="%H:%M:%S",
+        tickangle=60,
+        row=total_rows,
+        col=1,
+    )
+    if max_ts is not None:
+        fig.update_xaxes(range=[df["Timestamp"].min(), max_ts])
+
+    fig.update_layout(
+        height=max(600, total_rows * 300),
+        title_text=title,
+        title_font=dict(size=16),
+        hovermode="x unified",
+        template="plotly_white",
+        showlegend=False,
+    )
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="LightGray", griddash="dot", dtick=60000, hoverformat="%H:%M:%S")
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="LightGray", griddash="dot")
+    return fig
+
+
+# --- Sidebar ---
+st.sidebar.header("Test")
+available_tests = discover_tests(WORK_DIR)
+if not available_tests:
+    st.error("Nessun test trovato (attesi file 'Test N dati.csv').")
     st.stop()
 
-st.sidebar.header("Dati")
-st.sidebar.caption(f"Temperatura: `{paths['temperatura'].name}`")
-st.sidebar.caption(f"Olio: `{paths['olio'].name}`")
-st.sidebar.caption(f"Eventi: `{paths['eventi'].name}`")
+selected_tests = st.sidebar.multiselect(
+    "Seleziona test",
+    options=available_tests,
+    default=[available_tests[0]],
+    format_func=lambda n: f"Test {n}",
+    help="I test sono elencati dal numero più alto. Ogni test usa i file con lo stesso numero.",
+)
+
+if not selected_tests:
+    st.warning("Seleziona almeno un test dalla sidebar.")
+    st.stop()
+
+for test_num in selected_tests:
+    paths = test_paths(WORK_DIR, test_num)
+    missing = [
+        name
+        for name, path in paths.items()
+        if name != "descrizione" and (path is None or not path.exists())
+    ]
+    if missing:
+        st.error(f"File mancanti per Test {test_num}: {', '.join(missing)}")
+        st.stop()
+
 if st.sidebar.button("Ricarica dati"):
     st.cache_data.clear()
     st.rerun()
 
-df_raw = load_measurements(
-    str(paths["temperatura"]),
-    str(paths["olio"]),
-    file_mtime(paths["temperatura"]),
-    file_mtime(paths["olio"]),
-)
-if df_raw.empty:
-    st.warning("Nessun dato nei file CSV selezionati.")
-    st.stop()
-
-_ts_max_default = df_raw["Timestamp"].max().strftime("%Y-%m-%d %H:%M:%S")
-_ts_min = df_raw["Timestamp"].min().strftime("%Y-%m-%d %H:%M:%S")
-st.sidebar.caption(f"Intervallo: {_ts_min} → {_ts_max_default} ({len(df_raw)} punti)")
-
-data_version = (
-    file_mtime(paths["temperatura"]),
-    file_mtime(paths["olio"]),
-    file_mtime(paths["eventi"]),
-)
-if st.session_state.get("data_version") != data_version:
-    st.session_state["data_version"] = data_version
-    st.session_state["timestamp_max"] = _ts_max_default
-
-ref_date_str = df_raw["Timestamp"].iloc[0].strftime("%Y-%m-%d")
-events_df = load_events(
-    str(paths["eventi"]),
-    ref_date_str,
-    file_mtime(paths["eventi"]),
-)
-
-value_columns = [c for c in df_raw.columns if c != "Timestamp"]
+for test_num in selected_tests:
+    paths = test_paths(WORK_DIR, test_num)
+    st.sidebar.caption(f"Test {test_num}: `{paths['dati'].name}`, `{paths['eventi'].name}`")
 
 st.sidebar.markdown("---")
 st.sidebar.header("Parametri")
@@ -305,7 +368,7 @@ st.sidebar.header("Parametri")
 MOVING_AVERAGE_WINDOW = st.sidebar.number_input(
     "Finestra media mobile",
     min_value=1,
-    value=60,
+    value=10,
     help="Numero di campioni consecutivi per la media mobile.",
 )
 DERIVATIVE_PERIODS = st.sidebar.number_input(
@@ -321,13 +384,12 @@ SHOW_DERIVATIVE = st.sidebar.toggle(
 
 TIMESTAMP_MAX = st.sidebar.text_input(
     "Timestamp massimo da plottare",
-    value=st.session_state.get("timestamp_max", _ts_max_default),
-    help="Formato: YYYY-MM-DD HH:MM:SS",
+    value="",
+    help="Formato: YYYY-MM-DD HH:MM:SS. Lascia vuoto per usare tutti i dati.",
 )
-st.session_state["timestamp_max"] = TIMESTAMP_MAX
 
 MAX_TS = None
-if TIMESTAMP_MAX:
+if TIMESTAMP_MAX.strip():
     try:
         ts_str = str(TIMESTAMP_MAX)
         if len(ts_str) > 10:
@@ -336,11 +398,42 @@ if TIMESTAMP_MAX:
     except Exception as exc:
         st.sidebar.warning(f"Formato TIMESTAMP_MAX non valido: {exc}")
 
+test_datasets: list[dict] = []
+all_value_columns: list[str] = []
+
+for test_num in selected_tests:
+    paths = test_paths(WORK_DIR, test_num)
+    df_raw = load_measurements(str(paths["dati"]))
+    if df_raw.empty:
+        st.warning(f"Nessun dato nel file CSV di Test {test_num}.")
+        continue
+
+    ref_date_str = df_raw["Timestamp"].iloc[0].strftime("%Y-%m-%d")
+    events_df = load_events(str(paths["eventi"]), ref_date_str)
+    value_columns = [c for c in df_raw.columns if c not in ("timestamp", "Timestamp")]
+    for col in value_columns:
+        if col not in all_value_columns:
+            all_value_columns.append(col)
+
+    test_datasets.append(
+        {
+            "test_num": test_num,
+            "paths": paths,
+            "df_raw": df_raw,
+            "events_df": events_df,
+            "value_columns": value_columns,
+        }
+    )
+
+if not test_datasets:
+    st.stop()
+
 st.sidebar.markdown("---")
+default_columns = [c for c in all_value_columns if c != "pt100_1_c"]
 columns_to_plot = st.sidebar.multiselect(
     "Colonne da plottare",
-    options=value_columns,
-    default=value_columns,
+    options=all_value_columns,
+    default=default_columns or all_value_columns,
     format_func=lambda c: COLUMN_LABELS.get(c, c),
 )
 
@@ -348,97 +441,58 @@ if not columns_to_plot:
     st.warning("Seleziona almeno una colonna dalla sidebar.")
     st.stop()
 
-df = df_raw.copy()
-if MAX_TS is not None:
-    df = df[df["Timestamp"] <= MAX_TS].reset_index(drop=True)
+for dataset in test_datasets:
+    test_num = dataset["test_num"]
+    paths = dataset["paths"]
+    df_raw = dataset["df_raw"]
+    events_df = dataset["events_df"]
+    test_columns = [c for c in columns_to_plot if c in dataset["value_columns"]]
 
-for col in columns_to_plot:
-    df[f"{col}_Avg"] = df[col].rolling(window=MOVING_AVERAGE_WINDOW, min_periods=1).mean()
-    dt = df["Timestamp"].diff(periods=DERIVATIVE_PERIODS).dt.total_seconds()
-    dt = dt.replace(0, np.nan)
-    df[f"{col}_Deriv"] = df[f"{col}_Avg"].diff(periods=DERIVATIVE_PERIODS) / dt
+    if not test_columns:
+        st.warning(f"Test {test_num}: nessuna delle colonne selezionate è disponibile.")
+        continue
 
-timestamps_pct, timestamps_actions = parse_events(events_df, MAX_TS)
+    st.markdown(f"### Test {test_num}")
 
-if df.empty:
-    st.warning("Nessun dato da visualizzare per questo intervallo temporale.")
-    st.stop()
+    if paths["descrizione"] is not None:
+        description = load_description(str(paths["descrizione"]))
+        if description:
+            st.info(description)
 
-num_rows_per_col = 2 if SHOW_DERIVATIVE else 1
-total_rows = len(columns_to_plot) * num_rows_per_col
+    df = df_raw.copy()
+    if MAX_TS is not None:
+        df = df[df["Timestamp"] <= MAX_TS].reset_index(drop=True)
 
-fig = make_subplots(
-    rows=total_rows,
-    cols=1,
-    shared_xaxes=True,
-    vertical_spacing=0.05,
-)
+    for col in test_columns:
+        df[f"{col}_Avg"] = df[col].rolling(window=MOVING_AVERAGE_WINDOW, min_periods=1).mean()
+        dt = df["Timestamp"].diff(periods=DERIVATIVE_PERIODS).dt.total_seconds()
+        dt = dt.replace(0, np.nan)
+        df[f"{col}_Deriv"] = df[f"{col}_Avg"].diff(periods=DERIVATIVE_PERIODS) / dt
 
-colors_vlines = []
-if timestamps_pct:
-    colors_vlines = plotly.colors.sample_colorscale(
-        "Bluered",
-        [min(v / 50.0, 1.0) for (_, v, _) in timestamps_pct],
-    )
+    timestamps_pct, timestamps_actions = parse_events(events_df, MAX_TS)
 
-for idx, col in enumerate(columns_to_plot):
-    row_ax = idx * 2 + 1 if SHOW_DERIVATIVE else idx + 1
-    row_deriv = idx * 2 + 2 if SHOW_DERIVATIVE else None
-    label = COLUMN_LABELS.get(col, col)
+    if df.empty:
+        st.warning(f"Test {test_num}: nessun dato da visualizzare per questo intervallo temporale.")
+        continue
 
-    fig.add_trace(
-        go.Scatter(
-            x=df["Timestamp"],
-            y=df[f"{col}_Avg"],
-            mode="lines",
-            line=dict(color="#1f77b4", width=1.5, shape="hv"),
-            name=f"{label} — media {MOVING_AVERAGE_WINDOW} pt",
-            legendgroup=f"group{idx}",
+    _ts_min = df["Timestamp"].min().strftime("%Y-%m-%d %H:%M:%S")
+    _ts_max = df["Timestamp"].max().strftime("%Y-%m-%d %H:%M:%S")
+    st.caption(f"Intervallo: {_ts_min} → {_ts_max} ({len(df)} punti)")
+
+    fig = build_figure(
+        df=df,
+        columns_to_plot=test_columns,
+        timestamps_pct=timestamps_pct,
+        timestamps_actions=timestamps_actions,
+        moving_average_window=MOVING_AVERAGE_WINDOW,
+        show_derivative=SHOW_DERIVATIVE,
+        max_ts=MAX_TS,
+        title=(
+            f"Test {test_num} — valori mediati su {MOVING_AVERAGE_WINDOW} punti "
+            "(interpolazione a gradino)"
         ),
-        row=row_ax,
-        col=1,
     )
+    st.plotly_chart(fig, width="stretch")
 
-    if SHOW_DERIVATIVE and row_deriv is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=df["Timestamp"],
-                y=df[f"{col}_Deriv"],
-                mode="lines",
-                line=dict(color="darkorange", width=1.5, shape="hv"),
-                name=f"Derivata {label}",
-                legendgroup=f"group{idx}_deriv",
-            ),
-            row=row_deriv,
-            col=1,
-        )
-        fig.update_yaxes(title_text=f"Derivata {label}", row=row_deriv, col=1)
-
-    add_chart_overlays(fig, row_ax, df, timestamps_pct, timestamps_actions, colors_vlines, MAX_TS)
-    fig.update_yaxes(title_text=label, row=row_ax, col=1)
-
-fig.update_xaxes(
-    title_text="Tempo",
-    tickformat="%H:%M:%S",
-    tickangle=60,
-    row=total_rows,
-    col=1,
-)
-if MAX_TS is not None:
-    fig.update_xaxes(range=[df["Timestamp"].min(), MAX_TS])
-
-fig.update_layout(
-    height=max(600, total_rows * 300),
-    title_text=(
-        f"15/07/2026 — valori mediati su {MOVING_AVERAGE_WINDOW} punti "
-        "(interpolazione a gradino)"
-    ),
-    title_font=dict(size=16),
-    hovermode="x unified",
-    template="plotly_white",
-    showlegend=False,
-)
-fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="LightGray", griddash="dot", dtick=60000, hoverformat="%H:%M:%S")
-fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="LightGray", griddash="dot")
-
-st.plotly_chart(fig, width="stretch")
+    if test_num != selected_tests[-1]:
+        st.markdown("---")
